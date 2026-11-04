@@ -86,7 +86,7 @@ class _ShareForwardVideoHandler(SimpleHTTPRequestHandler):
     "astrbot_plugin_share_forward",
     "TRAE / Yamabuki-Kirio",
     "把抖音/B站/小红书分享链接解析后打包成 QQ 合并转发",
-    "1.1.5",
+    "1.1.6",
 )
 class ShareForwardPlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -523,6 +523,10 @@ class ShareForwardPlugin(Star):
         }
         if item.video_referer:
             headers["Referer"] = item.video_referer
+        if item.platform == "bilibili":
+            cookie = str(self.config.get("bilibili_cookie") or "").strip()
+            if cookie:
+                headers["Cookie"] = cookie.replace("\r", "").replace("\n", "")
 
         tmp_dir = self._get_download_dir()
         os.makedirs(tmp_dir, exist_ok=True)

@@ -25,12 +25,80 @@ _HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Referer": "https://www.bilibili.com",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Origin": "https://www.bilibili.com",
+    "Referer": "https://www.bilibili.com/",
 }
 
 
 class BilibiliParser(BaseParser):
     platform = "bilibili"
+
+    def __init__(self, http_client, logger, config: Optional[dict] = None):
+        super().__init__(http_client, logger, config)
+        self._bootstrapped = False
+
+    def _request_headers(self) -> dict[str, str]:
+        headers = dict(_HEADERS)
+        cookie = str(self.config.get("bilibili_cookie") or "").strip()
+        if cookie:
+            headers["Cookie"] = cookie.replace("\r", "").replace("\n", "")
+        return headers
+
+    async def _bootstrap_session(self, force: bool = False) -> None:
+        """访问主站，让客户端取得匿名风控 Cookie。"""
+        if self._bootstrapped and not force:
+            return
+        try:
+            response = await self.http.get(
+                "https://www.bilibili.com/",
+                headers=self._request_headers(),
+                follow_redirects=True,
+            )
+            if response.status_code >= 400:
+                self.logger.debug(
+                    f"[bilibili] 主站 Cookie 初始化失败: HTTP {response.status_code}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug(f"[bilibili] 主站 Cookie 初始化失败: {exc}")
+        self._bootstrapped = True
+
+    async def _get_json(self, url: str, *, params: dict, api_name: str) -> dict:
+        await self._bootstrap_session()
+        for attempt in range(2):
+            try:
+                response = await self.http.get(
+                    url,
+                    params=params,
+                    headers=self._request_headers(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise ParseError(f"调用 {api_name} 接口失败: {exc}") from exc
+
+            if response.status_code == 412 and attempt == 0:
+                await self._bootstrap_session(force=True)
+                continue
+            if response.status_code != 200:
+                raise ParseError(
+                    f"调用 {api_name} 接口失败: HTTP {response.status_code}"
+                )
+            try:
+                data = response.json()
+            except Exception as exc:  # noqa: BLE001
+                if attempt == 0:
+                    await self._bootstrap_session(force=True)
+                    continue
+                content_type = response.headers.get("content-type", "未知")
+                raise ParseError(
+                    f"调用 {api_name} 接口失败: 返回了非 JSON 内容"
+                    f"（HTTP 200，Content-Type: {content_type}）"
+                ) from exc
+            if data.get("code") == -412 and attempt == 0:
+                await self._bootstrap_session(force=True)
+                continue
+            return data
+        raise ParseError(f"调用 {api_name} 接口失败: Bilibili 风控拦截")
 
     async def can_parse(self, url: str) -> bool:
         return bool(_RE_BILIBILI.search(url))
@@ -50,7 +118,9 @@ class BilibiliParser(BaseParser):
             # b23.tv 等需要跟随
             try:
                 resp = await self.http.get(
-                    page_url, headers=_HEADERS, follow_redirects=True
+                    page_url,
+                    headers=self._request_headers(),
+                    follow_redirects=True,
                 )
                 final_url = str(resp.url)
             except Exception as e:  # noqa: BLE001
@@ -66,15 +136,11 @@ class BilibiliParser(BaseParser):
 
         # 2. 视频详情
         params = {"bvid": bv} if bv else {"aid": aid}
-        try:
-            r = await self.http.get(
-                "https://api.bilibili.com/x/web-interface/view",
-                params=params,
-                headers=_HEADERS,
-            )
-            data = r.json()
-        except Exception as e:  # noqa: BLE001
-            raise ParseError(f"调用 view 接口失败: {e}") from e
+        data = await self._get_json(
+            "https://api.bilibili.com/x/web-interface/view",
+            params=params,
+            api_name="view",
+        )
 
         if data.get("code") != 0:
             raise ParseError(f"view 接口返回错误: {data.get('message')}")
@@ -119,10 +185,7 @@ class BilibiliParser(BaseParser):
 
     async def _fetch_top_comments(self, aid: int) -> list[dict[str, str]]:
         """拉取 B 站热评。兼容新版 main 接口和旧版 reply 接口。"""
-        headers = dict(_HEADERS)
-        cookie = (self.config.get("bilibili_cookie") or "").strip()
-        if cookie:
-            headers["Cookie"] = cookie
+        headers = self._request_headers()
 
         candidates: list[dict] = []
 
@@ -202,12 +265,11 @@ class BilibiliParser(BaseParser):
             "platform": "html5",
             "high_quality": 1,
         }
-        r = await self.http.get(
+        data = await self._get_json(
             "https://api.bilibili.com/x/player/playurl",
             params=params,
-            headers=_HEADERS,
+            api_name="playurl",
         )
-        data = r.json()
         if data.get("code") == 0:
             play = data.get("data") or {}
             durl = play.get("durl") or []
@@ -217,12 +279,11 @@ class BilibiliParser(BaseParser):
         # 兜底：DASH 可能是音视频分离，这里只取视频流，至少保证“原视频”能出现。
         dash_params = dict(params)
         dash_params["fnval"] = 16
-        r2 = await self.http.get(
+        data2 = await self._get_json(
             "https://api.bilibili.com/x/player/playurl",
             params=dash_params,
-            headers=_HEADERS,
+            api_name="playurl",
         )
-        data2 = r2.json()
         if data2.get("code") != 0:
             return ""
         dash = ((data2.get("data") or {}).get("dash") or {})
