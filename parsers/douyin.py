@@ -13,7 +13,7 @@ import re
 from typing import Optional
 from urllib.parse import unquote
 
-from .base import BaseParser, ParsedItem, ParseError
+from .base import BaseParser, ParsedItem, ParseError, clean_text
 from .patterns import DOUYIN_LINK
 
 
@@ -110,10 +110,12 @@ class DouyinParser(BaseParser):
         if not detail:
             raise ParseError("未能在 share 页、视频页或 iteminfo 接口中找到抖音内容数据")
 
-        item.title = detail.get("desc", "") or detail.get("title", "")
+        item.title = clean_text(detail.get("desc", "")) or clean_text(
+            detail.get("title", "")
+        )
         author = detail.get("author") or {}
-        item.author = author.get("nickname", "")
-        item.desc = detail.get("desc", "")
+        item.author = clean_text(author.get("nickname", ""))
+        item.desc = clean_text(detail.get("desc", ""))
 
         # 视频
         video = detail.get("video") or {}

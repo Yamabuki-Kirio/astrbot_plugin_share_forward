@@ -3,8 +3,14 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from parsers.base import clean_text
+
 
 MAIN = Path(__file__).parents[1] / "main.py"
+
+
+def _desc_text(item):
+    return clean_text(getattr(item, "desc", ""))
 
 
 def _load_formatter():
@@ -18,7 +24,7 @@ def _load_formatter():
         if isinstance(node, ast.FunctionDef) and node.name == "_format_desc_block"
     )
     ast.fix_missing_locations(method)
-    namespace = {"ParsedItem": object}
+    namespace = {"ParsedItem": object, "_desc_text": _desc_text}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(MAIN), "exec"), namespace)
     return namespace["_format_desc_block"]
 

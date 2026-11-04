@@ -30,6 +30,7 @@ from .parsers import (
     ParseError,
     ParsedItem,
     XiaohongshuParser,
+    clean_text,
 )
 from .parsers.patterns import SUPPORTED_SHARE_URL
 
@@ -54,6 +55,11 @@ _PLATFORM_TAGS = {
 
 def _platform_tag(platform: str) -> str:
     return _PLATFORM_TAGS.get(platform, f"[{platform}]")
+
+
+def _desc_text(item: ParsedItem) -> str:
+    """简介/正文实际可发送的文本；`-`、`暂无简介` 之类的占位符按空处理。"""
+    return clean_text(getattr(item, "desc", ""))
 
 
 def _make_node(uin: str, name: str, content: list):
@@ -122,7 +128,7 @@ class _ShareForwardVideoHandler(SimpleHTTPRequestHandler):
     "astrbot_plugin_share_forward",
     "TRAE / Yamabuki-Kirio",
     "把抖音/B站/小红书分享链接解析后打包成 QQ 合并转发",
-    "1.1.10",
+    "1.1.11",
 )
 class ShareForwardPlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -339,9 +345,10 @@ class ShareForwardPlugin(Star):
             )
 
         # 2) 正文内容
-        if fc.get("include_text_desc", True) and item.desc and item.desc != item.title:
+        desc = _desc_text(item)
+        if fc.get("include_text_desc", True) and desc and desc != item.title:
             section_title = "📝 简介" if item.platform == "bilibili" else "📝 正文内容"
-            _add_text_section(nodes, bot_uin, bot_name, section_title, item.desc)
+            _add_text_section(nodes, bot_uin, bot_name, section_title, desc)
 
         # 3) 图片内容
         if fc.get("include_cover", True):
@@ -429,7 +436,8 @@ class ShareForwardPlugin(Star):
         if fc.get("include_title_author", True):
             _append_plain_node(nodes, bot_uin, bot_name, self._format_title_block(item))
 
-        if fc.get("include_text_desc", True) and item.desc and item.desc != item.title:
+        desc = _desc_text(item)
+        if fc.get("include_text_desc", True) and desc and desc != item.title:
             _append_plain_node(
                 nodes, bot_uin, bot_name, self._format_desc_block(item)
             )
@@ -501,7 +509,8 @@ class ShareForwardPlugin(Star):
             # 头部信息
             if fc.get("include_title_author", True):
                 yield event.plain_result(self._format_title_block(item))
-            if fc.get("include_text_desc", True) and item.desc and item.desc != item.title:
+            desc = _desc_text(item)
+            if fc.get("include_text_desc", True) and desc and desc != item.title:
                 yield event.plain_result(self._format_desc_block(item))
 
             if fc.get("include_cover", True):
@@ -543,7 +552,7 @@ class ShareForwardPlugin(Star):
     @staticmethod
     def _format_desc_block(item: ParsedItem) -> str:
         label = "简介" if item.platform == "bilibili" else "正文"
-        return f"📝 {label}：{item.desc}"
+        return f"📝 {label}：{_desc_text(item)}"
 
     def _format_link_block(self, item: ParsedItem) -> str:
         lines = ["🌐 原始链接：" + (item.canonical_url or item.raw_url)]

@@ -7,7 +7,7 @@ import asyncio
 import re
 from typing import Optional
 
-from .base import BaseParser, ParsedItem, ParseError
+from .base import BaseParser, ParsedItem, ParseError, clean_text
 from .patterns import BILIBILI_LINK
 
 
@@ -166,9 +166,9 @@ class BilibiliParser(BaseParser):
             platform="bilibili",
             raw_url=url,
             item_type="video",
-            title=info.get("title", ""),
-            author=(info.get("owner") or {}).get("name", ""),
-            desc=info.get("desc", ""),
+            title=clean_text(info.get("title", "")),
+            author=clean_text((info.get("owner") or {}).get("name", "")),
+            desc=clean_text(info.get("desc", "")),
             cover=info.get("pic", ""),
             canonical_url=f"https://www.bilibili.com/video/{info.get('bvid', bv)}",
             extra={

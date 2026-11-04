@@ -11,7 +11,7 @@ import json
 import re
 from typing import Optional, Tuple
 
-from .base import BaseParser, ParsedItem, ParseError
+from .base import BaseParser, ParsedItem, ParseError, clean_text
 from .patterns import XIAOHONGSHU_LINK
 
 
@@ -105,12 +105,14 @@ class XiaohongshuParser(BaseParser):
             platform="xiaohongshu",
             raw_url=url,
             canonical_url=explore_url,
-            title=note_detail.get("title", ""),
-            desc=note_detail.get("desc", ""),
+            title=clean_text(note_detail.get("title", "")),
+            desc=clean_text(note_detail.get("desc", "")),
             extra={"note_id": note_id},
         )
         user = note_detail.get("user") or {}
-        item.author = user.get("nickname", "") or user.get("nick_name", "")
+        item.author = clean_text(
+            user.get("nickname", "") or user.get("nick_name", "")
+        )
 
         note_type = note_detail.get("type") or note_detail.get("note_type") or ""
         # 图片列表

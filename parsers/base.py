@@ -4,6 +4,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
+# B 站等平台在"没有简介"时会下发占位符而不是空串，直接发出去就会变成"简介：-"。
+EMPTY_TEXT_PLACEHOLDERS = {"-", "--", "—", "――", "暂无", "暂无简介"}
+
+
+def clean_text(value: object) -> str:
+    """去掉首尾空白；占位符（如 `-`）按空文本处理。"""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if text in EMPTY_TEXT_PLACEHOLDERS:
+        return ""
+    return text
+
 
 class ParseError(Exception):
     """解析失败"""

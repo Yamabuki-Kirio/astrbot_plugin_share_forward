@@ -2,7 +2,7 @@ name: astrbot_plugin_share_forward
 display_name: 分享链接合并转发
 short_desc: 解析抖音/B站/小红书分享链接并打包为 QQ 合并转发
 desc: 自动识别抖音/B站/小红书等主流平台分享链接，解析内容（标题、作者、视频、图集、纯文字、高赞评论）并打包成一条 QQ 合并转发消息发送
-version: 1.1.10
+version: 1.1.11
 author: TRAE / Yamabuki-Kirio
 repo: https://github.com/Yamabuki-Kirio/astrbot_plugin_share_forward
 astrbot_version: ">=4.25.0,<5"
