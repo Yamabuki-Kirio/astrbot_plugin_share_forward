@@ -86,7 +86,7 @@ class _ShareForwardVideoHandler(SimpleHTTPRequestHandler):
     "astrbot_plugin_share_forward",
     "TRAE / Yamabuki-Kirio",
     "把抖音/B站/小红书分享链接解析后打包成 QQ 合并转发",
-    "1.1.6",
+    "1.1.7",
 )
 class ShareForwardPlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -155,7 +155,7 @@ class ShareForwardPlugin(Star):
     # ------------------------------------------------------------------ #
     # 主消息处理
     # ------------------------------------------------------------------ #
-    @filter.regex(r"[\s\S]+")
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         if not self.config.get("enabled", True):
             return
