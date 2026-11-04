@@ -50,12 +50,12 @@
     }
   },
   "forward_content": {
-    "description": "合并转发节点包含的内容",
+    "description": "发送内容",
     "type": "object",
-    "hint": "选择要包含在合并转发里的素材",
+    "hint": "选择要发送的素材；QQ 合并转发和普通消息发送路径都会遵守这些开关。",
     "items": {
       "include_title_author": {
-        "description": "标题 + 作者 + 平台标签节点",
+        "description": "标题 + 作者节点",
         "type": "bool",
         "default": true
       },
@@ -80,7 +80,7 @@
         "default": true
       },
       "include_text_desc": {
-        "description": "正文/描述节点（抖音纯文字动态、B 站简介、小红书正文等）",
+        "description": "正文/简介节点（抖音纯文字动态、B 站简介、小红书正文等）",
         "type": "bool",
         "default": true
       }

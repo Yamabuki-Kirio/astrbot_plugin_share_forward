@@ -14,7 +14,7 @@
     - 高赞评论 Top 3（需配置 Cookie）
   - 哔哩哔哩 B 站（`b23.tv` / `bilibili.com/video/BVxxx`）
     - 视频标题、UP 主、封面、简介
-    - 原视频流（优先音视频合一 `durl`，失败兜底 `dash.video`）
+    - 音视频合一视频流；按 4K、1080P60、1080P+、1080P、720P60、720P、480P、360P 的顺序，选择大小限制内最清晰的可用版本
     - 高赞评论 Top 3（匿名可获取）
   - 小红书（`xhslink.com` / `xiaohongshu.com/explore/...`）
     - 图文、视频笔记
@@ -26,8 +26,8 @@
   - 原始链接 + 无水印直链
   - 高赞评论 Top 3
   - 正文/动态描述
-- 仅 QQ 平台（`aiocqhttp`）使用合并转发，其他平台自动降级为多条普通消息。
-- 支持 QQ 卡片消息解析：如果分享链接被平台包装成 JSON 卡片，也会尝试从卡片中提取真实链接。
+- 仅 QQ 平台（`aiocqhttp`）使用合并转发，其他平台自动降级为多条普通消息；两种发送路径都遵守内容节点开关。
+- 支持纯 QQ JSON 卡片消息：即使消息没有文本内容，也会优先从 `qqdocurl` 等真实跳转字段提取受支持平台链接。
 - 默认识别到可解析链接后先发送 `解析bot为您服务 ٩( 'ω' )و`，便于判断插件是否触发。
 - 合并转发默认按内容分类展示：📌解析信息、📝正文内容、🖼️图片内容、🎬视频内容、💬热门评论、🔗链接信息。
 - 支持同链接防抖、解析重试、代理、群/会话白名单、私聊开关。
@@ -36,26 +36,11 @@
   - B 站：使用独立 `bilibili_video_send_mode`，只支持 `download` / `off`
   - B 站默认 `download`，插件先下载视频，再通过插件内置 HTTP 文件服务或共享目录交给 NapCat，避免跨容器 `/tmp` 路径不可见。
   - `download` 模式下载的临时视频默认会延迟清理，避免 NapCat 尚未读取文件就被删除。
-- `v1.0.2` 修复抖音分享页不返回旧 `_ROUTER_DATA` 时的解析失败问题，增加移动端 UA、括号配平提取、`douyin.com/video/{id}` 页面兜底和旧 `iteminfo` 接口兜底。
-- `v1.0.3` 参考 `drdon1234/astrbot_plugin_douyin_bot` 的可用路径：短链优先 `HEAD` 跟随、宽松提取数字 ID、优先从 `loaderData -> videoInfoRes -> item_list[0]` 解析抖音内容，并补充触发提示消息。
-- `v1.0.4` 新增合并转发分组模式，默认按内容分类插入标题节点；同时去掉解析信息里的平台标签，只保留内容类型、标题、作者。
-- `v1.0.5` 去掉解析信息里的“类型”字段，并为分类标题、标题、作者、点赞、链接等信息加入轻量 emoji，让合并转发更清晰。
-- `v1.0.6` 精简热门评论格式：去掉用户名、点赞数和数字序号，改用 🥇🥈🥉 奖牌展示前三条评论。
-- `v1.0.7` 修复 B 站原视频不出现的问题，新增 `x/player/playurl` 播放流获取逻辑。
-- `v1.0.8` 修复 NapCat 发送 B 站视频合并转发时报 `handleOb11FileLikeMessage terminated` 的问题：默认不把 B站 CDN 视频 URL 放进伪造合并转发视频节点，只在链接信息里保留视频直链。
-- `v1.0.9` 将 B 站视频发送改为独立设置 `bilibili_video_send_mode`，只保留 `download` 和 `off` 两个选项，默认 `download`。
-- `v1.1.0` 新增 `cleanup_downloaded_video`，默认发送流程结束后自动清理 download 模式下载的视频文件。
-- `v1.1.1` 修复清理过早导致 NapCat 报 `ENOENT: no such file or directory` 的问题，改为默认延迟 600 秒清理临时视频。
-- `v1.1.2` 修复 AstrBot 与 NapCat 不在同一容器时 B 站 `download` 模式仍报 `ENOENT` 的问题：新增插件内置 HTTP 文件服务、共享目录模式和可配置下载目录，避免把 AstrBot 容器内的 `/tmp` 路径直接交给 NapCat。
-- `v1.1.3` 修复部分 B 站视频热评为空的问题：同时兼容 `top_replies`、新版评论主接口和旧版热度排序接口，并新增可选 B站 Cookie 配置。
-- `v1.1.4` 修复纯文字/图集帖子仍显示「🎬 视频内容」分类的问题：合并转发和链接信息中的视频相关节点现在正确检查 `item_type == "video"`。
-- `v1.1.5` 修复 QQ 小程序卡片被图标、预览图或内部链接干扰，导致 B 站短链误识别成 `av5` 的问题；卡片解析现在优先读取 `qqdocurl` 等真实跳转字段。
-- `v1.1.6` 修复 B 站直链和卡片在风控环境下调用 `view` 接口返回空内容的问题：补齐浏览器请求头、主站匿名 Cookie 初始化、用户 Cookie 透传，并在 HTTP 412、接口 `-412` 或非 JSON 响应时刷新 Cookie 后重试一次。
-- `v1.1.7` 修复纯 QQ JSON 卡片只有 `ComponentType.Json`、没有文本内容时不会触发插件的问题；监听器现在接收全部消息类型，再在插件内部只处理受支持平台链接。
-
 ## 🔧 安装
 
-把本目录放进 `AstrBot/data/plugins/`，然后在 WebUI 的「插件管理」里点击重载即可。
+仓库地址：`https://github.com/Yamabuki-Kirio/astrbot_plugin_share_forward`
+
+通过 AstrBot 插件管理安装此仓库，或者把仓库目录放进 `AstrBot/data/plugins/`，然后在 WebUI 的「插件管理」里点击重载。
 
 ## ⚙️ 配置项
 
@@ -67,7 +52,7 @@
 | `notify_when_triggered` | 识别到可解析链接后先发送触发提示 |
 | `forward_grouping_mode` | 合并转发分组模式：`sectioned` 分类模式 / `flat` 旧版平铺模式 |
 | `platforms` | 启用哪些平台（抖音 / B 站 / 小红书） |
-| `forward_content` | 合并转发节点包含哪些内容 |
+| `forward_content` | 选择标题作者、封面/图集、视频文件、链接、热门评论、正文/简介；合并转发和普通发送都生效 |
 | `use_forward_message` | 是否使用 QQ 合并转发，不稳定时可关闭 |
 | `video_send_mode` | 抖音/小红书视频发送模式：`direct_url` / `download` / `off` |
 | `bilibili_video_send_mode` | B 站视频发送模式：`download` / `off`，默认 `download` |
@@ -80,7 +65,7 @@
 | `bilibili_shared_video_dir` | shared_dir 模式下 NapCat 容器能看到的共享目录路径 |
 | `cleanup_downloaded_video` | download 模式发送后延迟自动删除临时视频文件 |
 | `cleanup_downloaded_video_delay` | 下载视频延迟清理秒数，默认 600 |
-| `video_max_size_mb` | 视频文件直发的最大体积（MB） |
+| `video_max_size_mb` | 视频文件直发的最大体积（MB）；B 站会选择此限制内最清晰的音视频合一版本 |
 | `max_images_per_forward` | 图集最多发送图片数量 |
 | `request_timeout` | 单次请求超时（秒） |
 | `retry_count` | 解析失败重试次数 |
@@ -154,34 +139,21 @@ bilibili_download_access_mode = local_file
 
 ## 🧩 工作原理
 
-1. 监听所有消息（`@filter.regex`，无需 at 机器人即可触发）
-2. 从纯文本和 QQ JSON 卡片中提取出可能的 URL
+1. 监听全部消息类型，无需 at 机器人即可触发
+2. 从纯文本和 QQ JSON 卡片中提取受支持平台 URL；卡片优先读取真实跳转字段
 3. 先检查白名单、私聊开关、同链接防抖
 4. 依次让各平台解析器判定能否处理，并按配置做失败重试
 5. 解析器返回 `ParsedItem`（含标题/作者/视频/图集/评论等）
 6. 主流程根据配置组装合并转发的 `Node` 列表
 7. 通过 `event.chain_result([Comp.Nodes(...)])` 发出，或降级为普通消息
 
-## 🧪 参考与取舍
-
-开发时参考了 AstrBot 插件市场中同类解析插件的工程设计，例如：
-
-- `astrbot_plugin_link_resolver`：吸收了平台独立配置、重试、防抖、错误处理、合并转发开关等思路。
-- `astrbot_plugin_parser`：吸收了卡片消息解析、白名单/黑名单、同会话防抖、多解析器注册等思路。
-- `douyin_bot`：吸收了 `iesdouyin.com/share/video/{id}` + `_ROUTER_DATA` 的轻量解析路径。
-
-没有照搬的部分：
-
-- 不依赖第三方解析 API，避免接口失效或隐私问题。
-- 不把天气、热搜等无关功能塞进同一个插件。
-- 不使用 `template_list` 做复杂平台配置，避免 AstrBot 4.25.2 WebUI 的兼容性坑。
-- 不在 Node 内嵌套 Node，图集统一按“一张图片一个节点”发送，兼容性更稳。
-
 ## ⚠️ 风险与限制
 
 - 三大平台的反爬策略时常变化，本插件采用尽量"无签名/弱签名"的解析路径，
-  **可能在风控更新后失效**，请关注仓库 issues。
+  **可能在风控更新后失效**。
 - 抖音评论需要 Cookie；不带 Cookie 时仅返回视频/图集/正文。
+- B 站匿名请求会先访问主站取得基础 Cookie；仍被风控时需要配置 `bilibili_cookie`。
+- B 站可选画质取决于视频本身和 Cookie 权限；只发送 `playurl` 返回的音视频合一版本。
 - 小红书必须配置 Cookie，否则会被风控直接拒绝。
 - 视频文件直发受 QQ Bot 协议端文件大小限制（NapCat / Lagrange 一般 ≤100MB）。
 

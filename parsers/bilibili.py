@@ -165,10 +165,19 @@ class BilibiliParser(BaseParser):
 
         # 3. 原视频流地址。优先 durl（通常音视频合一），失败再兜底 dash.video。
         try:
-            video_url = await self._fetch_play_url(info)
+            video_url, quality_name, video_size = await self._fetch_play_url(info)
             if video_url:
                 item.video_url = video_url
                 item.video_referer = item.canonical_url or "https://www.bilibili.com/"
+                item.extra["video_quality"] = quality_name
+                item.extra["video_size"] = str(video_size or "")
+                size_text = (
+                    f"，预计大小: {video_size / 1024 / 1024:.1f} MB"
+                    if video_size else ""
+                )
+                self.logger.info(
+                    f"[share_forward] Bilibili 视频选择画质: {quality_name}{size_text}"
+                )
         except Exception as e:  # noqa: BLE001
             self.logger.debug(f"[bilibili] 视频流拉取失败: {e}")
 
@@ -248,51 +257,57 @@ class BilibiliParser(BaseParser):
                 break
         return comments
 
-    async def _fetch_play_url(self, info: dict) -> str:
+    async def _fetch_play_url(self, info: dict) -> tuple[str, str, Optional[int]]:
         bvid = info.get("bvid")
         cid = info.get("cid")
         if not bvid or not cid:
-            return ""
+            return "", "", None
 
-        # html5 + fnval=0 更容易返回 durl，适合 QQ 作为普通视频文件发送。
-        params = {
-            "bvid": bvid,
-            "cid": cid,
-            "qn": 64,
-            "fnval": 0,
-            "fourk": 0,
-            "otype": "json",
-            "platform": "html5",
-            "high_quality": 1,
+        # 与现有 bili_resolver 一致：从高到低请求音视频合一 durl，
+        # 选择体积限制内的第一个候选，即可发送的最清晰版本。
+        quality_names = {
+            120: "4K", 116: "1080P60", 112: "1080P+", 80: "1080P",
+            74: "720P60", 64: "720P", 32: "480P", 16: "360P",
         }
-        data = await self._get_json(
-            "https://api.bilibili.com/x/player/playurl",
-            params=params,
-            api_name="playurl",
-        )
-        if data.get("code") == 0:
-            play = data.get("data") or {}
-            durl = play.get("durl") or []
-            if durl:
-                return durl[0].get("url", "")
+        max_mb = max(1, int(self.config.get("video_max_size_mb", 80) or 80))
+        max_bytes = max_mb * 1024 * 1024
+        seen_qualities: set[int] = set()
 
-        # 兜底：DASH 可能是音视频分离，这里只取视频流，至少保证“原视频”能出现。
-        dash_params = dict(params)
-        dash_params["fnval"] = 16
-        data2 = await self._get_json(
-            "https://api.bilibili.com/x/player/playurl",
-            params=dash_params,
-            api_name="playurl",
-        )
-        if data2.get("code") != 0:
-            return ""
-        dash = ((data2.get("data") or {}).get("dash") or {})
-        videos = dash.get("video") or []
-        if not videos:
-            return ""
-        videos.sort(key=lambda x: int(x.get("bandwidth", 0) or 0), reverse=True)
-        best = videos[0]
-        return best.get("base_url") or best.get("baseUrl") or ""
+        for requested_quality in (120, 116, 112, 80, 74, 64, 32, 16):
+            params = {
+                "bvid": bvid,
+                "cid": cid,
+                "qn": requested_quality,
+                "fnval": 0,
+                "fourk": 1,
+                "otype": "json",
+                "platform": "html5",
+                "high_quality": 1,
+            }
+            data = await self._get_json(
+                "https://api.bilibili.com/x/player/playurl",
+                params=params,
+                api_name="playurl",
+            )
+            if data.get("code") != 0:
+                continue
+            play = data.get("data") or {}
+            actual_quality = int(play.get("quality") or 0)
+            if actual_quality in seen_qualities:
+                continue
+            seen_qualities.add(actual_quality)
+            durl = play.get("durl") or []
+            if len(durl) != 1 or not durl[0].get("url"):
+                continue
+            size = int(durl[0].get("size") or 0) or None
+            if size and size > max_bytes:
+                continue
+            return (
+                durl[0]["url"],
+                quality_names.get(actual_quality, f"QN{actual_quality}"),
+                size,
+            )
+        return "", "", None
 
 
 def _extract_bv(url: str) -> Optional[str]:
