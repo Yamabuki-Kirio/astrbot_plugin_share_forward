@@ -33,12 +33,12 @@
     "hint": "勾选要识别和解析的平台",
     "items": {
       "douyin": {
-        "description": "抖音 / TikTok（v.douyin.com、douyin.com、iesdouyin.com）",
+        "description": "抖音（v.douyin.com、douyin.com、iesdouyin.com）",
         "type": "bool",
         "default": true
       },
       "bilibili": {
-        "description": "哔哩哔哩 B 站（b23.tv、bilibili.com）",
+        "description": "哔哩哔哩 B 站（b23.tv、bilibili.com/video 视频页）",
         "type": "bool",
         "default": true
       },
@@ -90,13 +90,13 @@
     "description": "视频文件最大下载大小 (MB)",
     "type": "int",
     "default": 80,
-    "hint": "仅在“视频发送模式”为 download 时生效。超过此体积的视频不会作为视频文件直发，只保留直链。建议 50-100。"
+    "hint": "仅在“视频发送模式”为 download 时生效。B 站会在匿名可用的画质里按体积挑最清晰的一档（通常最高 720P，配置 Cookie 后可能到 1080P），超过此体积的版本会被跳过，只保留直链。建议 50-100。"
   },
   "cleanup_downloaded_video": {
     "description": "发送后清理下载视频",
     "type": "bool",
     "default": true,
-    "hint": "开启后，download 模式临时下载的视频会延迟自动删除，避免临时目录堆积。关闭后会保留下载文件用于缓存复用。"
+    "hint": "开启后，download 模式临时下载的视频会延迟自动删除。清理前会检查文件是否刚被其他会话复用，避免删掉正在发送的文件；同一视频在延迟时间内被再次分享会直接复用，不再重复下载。"
   },
   "cleanup_downloaded_video_delay": {
     "description": "下载视频延迟清理秒数",
@@ -129,7 +129,7 @@
       "download",
       "off"
     ],
-    "hint": "download：插件先下载 B站视频，再按下面的“B站下载视频访问方式”交给 NapCat；off：不发送 B站视频文件，只保留视频直链。B站不提供 direct_url 选项，因为 NapCat 直接拉 bilivideo.com 链接容易失败。"
+    "hint": "download：插件先下载 B站视频，再按下面的“B站下载视频访问方式”交给 NapCat；off：不发送 B站视频文件，只保留视频直链。B站不提供 direct_url 选项，因为 NapCat 直接拉 bilivideo.com 链接容易失败。未配置访问方式时会直接跳过视频节点，不会先下载再丢弃。"
   },
   "bilibili_download_access_mode": {
     "description": "B站下载视频访问方式",

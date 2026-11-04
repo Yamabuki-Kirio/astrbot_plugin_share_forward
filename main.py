@@ -31,6 +31,7 @@ from .parsers import (
     ParsedItem,
     XiaohongshuParser,
 )
+from .parsers.patterns import SUPPORTED_SHARE_URL
 
 
 _RE_URL = re.compile(
@@ -39,18 +40,53 @@ _RE_URL = re.compile(
     re.IGNORECASE,
 )
 
-_RE_SUPPORTED_SHARE_URL = re.compile(
-    r"(?:https?://)?(?:"
-    r"(?:www\.|m\.)?bilibili\.com/[^\s\u4e00-\u9fa5\"'<>]+|"
-    r"b23\.tv/[A-Za-z0-9]+|"
-    r"v\.douyin\.com/[A-Za-z0-9_\-/]+|"
-    r"xhslink\.com/[A-Za-z0-9_\-/]+|"
-    r"(?:www\.)?xiaohongshu\.com/[^\s\u4e00-\u9fa5\"'<>]+"
-    r")",
-    re.IGNORECASE,
-)
-
 _CARD_URL_KEYS = ("qqdocurl", "jumpUrl", "jump_url", "sourceUrl", "source_url", "url")
+
+# 1 MiB 一块：80MB 视频从 1280 次读写降到 80 次，既省 syscall 也少抢事件循环。
+_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+
+_PLATFORM_TAGS = {
+    "douyin": "[抖音]",
+    "bilibili": "[哔哩哔哩]",
+    "xiaohongshu": "[小红书]",
+}
+
+
+def _platform_tag(platform: str) -> str:
+    return _PLATFORM_TAGS.get(platform, f"[{platform}]")
+
+
+def _make_node(uin: str, name: str, content: list):
+    return Comp.Node(uin=uin, name=name, content=content)
+
+
+def _append_plain_node(nodes: list, uin: str, name: str, text: str) -> bool:
+    if not text:
+        return False
+    nodes.append(_make_node(uin, name, [Comp.Plain(text)]))
+    return True
+
+
+def _append_section(nodes: list, uin: str, name: str, title: str) -> None:
+    nodes.append(_make_node(uin, name, [Comp.Plain(f"【{title}】")]))
+
+
+def _add_text_section(nodes: list, uin: str, name: str, title: str, text: str) -> bool:
+    """正文非空时才添加分类标题，避免只剩一个“💬 热门评论”的空节点。"""
+    if not text:
+        return False
+    _append_section(nodes, uin, name, title)
+    _append_plain_node(nodes, uin, name, text)
+    return True
+
+
+def _safe_unlink(path: str) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 class _ShareForwardVideoHandler(SimpleHTTPRequestHandler):
@@ -86,7 +122,7 @@ class _ShareForwardVideoHandler(SimpleHTTPRequestHandler):
     "astrbot_plugin_share_forward",
     "TRAE / Yamabuki-Kirio",
     "把抖音/B站/小红书分享链接解析后打包成 QQ 合并转发",
-    "1.1.8",
+    "1.1.10",
 )
 class ShareForwardPlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -97,6 +133,9 @@ class ShareForwardPlugin(Star):
         self._recent_links: dict[str, float] = {}
         self._file_server: Optional[ThreadingHTTPServer] = None
         self._file_server_thread: Optional[threading.Thread] = None
+        # 同一个视频被多个会话同时分享时，只下载一次。
+        self._download_locks: dict[str, asyncio.Lock] = {}
+        self._warned_bilibili_access = False
         self._build_parsers()
 
     # ------------------------------------------------------------------ #
@@ -184,16 +223,22 @@ class ShareForwardPlugin(Star):
 
             if self._is_debounced(event, url):
                 self._dlog(f"链接在防抖窗口内，跳过: {url}")
+                # 只 return 不 stop_event 的话，插件不吭声但 LLM 会继续回复这条链接。
+                if self.config.get("stop_event_after_match", True):
+                    event.stop_event()
                 return
 
+            # 先落防抖记录再解析：同一链接的两条消息几乎同时到达时只解析一次；
+            # 解析失败会立即撤销记录，用户重发仍能重试。
+            self._mark_debounce(event, url)
             self._dlog(f"匹配到 {parser.platform} 链接: {url}")
             if self.config.get("notify_when_triggered", True):
                 yield event.plain_result("解析bot为您服务 ٩( 'ω' )و")
 
             try:
                 item = await self._parse_with_retry(parser, url)
-                self._mark_debounce(event, url)
             except ParseError as e:
+                self._clear_debounce(event, url)
                 logger.warning(f"[share_forward] {parser.platform} 解析失败: {e}")
                 if self.config.get("reply_when_fail", True):
                     yield event.plain_result(
@@ -203,6 +248,7 @@ class ShareForwardPlugin(Star):
                     event.stop_event()
                 return
             except Exception as e:  # noqa: BLE001
+                self._clear_debounce(event, url)
                 logger.exception(f"[share_forward] {parser.platform} 解析异常: {e}")
                 if self.config.get("reply_when_fail", True):
                     yield event.plain_result(
@@ -288,19 +334,19 @@ class ShareForwardPlugin(Star):
 
         # 1) 解析信息
         if fc.get("include_title_author", True):
-            self._append_section(nodes, bot_uin, bot_name, "📌 解析信息")
-            self._append_plain_node(nodes, bot_uin, bot_name, self._format_title_block(item))
+            _add_text_section(
+                nodes, bot_uin, bot_name, "📌 解析信息", self._format_title_block(item)
+            )
 
         # 2) 正文内容
         if fc.get("include_text_desc", True) and item.desc and item.desc != item.title:
             section_title = "📝 简介" if item.platform == "bilibili" else "📝 正文内容"
-            self._append_section(nodes, bot_uin, bot_name, section_title)
-            self._append_plain_node(nodes, bot_uin, bot_name, item.desc)
+            _add_text_section(nodes, bot_uin, bot_name, section_title, item.desc)
 
         # 3) 图片内容
         if fc.get("include_cover", True):
             if item.item_type == "images" and item.images:
-                self._append_section(nodes, bot_uin, bot_name, "🖼️ 图片内容")
+                _append_section(nodes, bot_uin, bot_name, "🖼️ 图片内容")
                 images = self._limit_images(item.images)
                 for idx, img in enumerate(images, 1):
                     nodes.append(
@@ -314,7 +360,7 @@ class ShareForwardPlugin(Star):
                         )
                     )
             elif item.cover:
-                self._append_section(nodes, bot_uin, bot_name, "🖼️ 图片内容")
+                _append_section(nodes, bot_uin, bot_name, "🖼️ 图片内容")
                 nodes.append(
                     Comp.Node(
                         uin=bot_uin,
@@ -331,7 +377,7 @@ class ShareForwardPlugin(Star):
         ):
             video_component = await self._build_video_component(item, cleanup_paths)
             if video_component:
-                self._append_section(nodes, bot_uin, bot_name, "🎬 视频内容")
+                _append_section(nodes, bot_uin, bot_name, "🎬 视频内容")
                 nodes.append(
                     Comp.Node(
                         uin=bot_uin,
@@ -342,17 +388,19 @@ class ShareForwardPlugin(Star):
 
         # 5) 热门评论
         if fc.get("include_top_comments", True) and item.comments:
-            self._append_section(nodes, bot_uin, bot_name, "💬 热门评论")
-            self._append_plain_node(
-                nodes, bot_uin, bot_name, self._format_comments_block(item)
+            _add_text_section(
+                nodes,
+                bot_uin,
+                bot_name,
+                "💬 热门评论",
+                self._format_comments_block(item),
             )
 
         # 6) 链接信息
         if fc.get("include_links", True):
-            link_text = self._format_link_block(item)
-            if link_text:
-                self._append_section(nodes, bot_uin, bot_name, "🔗 链接信息")
-                self._append_plain_node(nodes, bot_uin, bot_name, link_text)
+            _add_text_section(
+                nodes, bot_uin, bot_name, "🔗 链接信息", self._format_link_block(item)
+            )
 
         if not nodes:
             yield event.plain_result(
@@ -379,10 +427,10 @@ class ShareForwardPlugin(Star):
         fc = self.config.get("forward_content", {}) or {}
 
         if fc.get("include_title_author", True):
-            self._append_plain_node(nodes, bot_uin, bot_name, self._format_title_block(item))
+            _append_plain_node(nodes, bot_uin, bot_name, self._format_title_block(item))
 
         if fc.get("include_text_desc", True) and item.desc and item.desc != item.title:
-            self._append_plain_node(
+            _append_plain_node(
                 nodes, bot_uin, bot_name, self._format_desc_block(item)
             )
 
@@ -425,14 +473,14 @@ class ShareForwardPlugin(Star):
                 )
 
         if fc.get("include_top_comments", True) and item.comments:
-            self._append_plain_node(
-                nodes, bot_uin, bot_name, "热门评论 Top 3:\n" + self._format_comments_block(item)
-            )
+            comments_text = self._format_comments_block(item)
+            if comments_text:
+                _append_plain_node(
+                    nodes, bot_uin, bot_name, "热门评论 Top 3:\n" + comments_text
+                )
 
         if fc.get("include_links", True):
-            link_text = self._format_link_block(item)
-            if link_text:
-                self._append_plain_node(nodes, bot_uin, bot_name, link_text)
+            _append_plain_node(nodes, bot_uin, bot_name, self._format_link_block(item))
 
         if not nodes:
             yield event.plain_result(
@@ -473,28 +521,24 @@ class ShareForwardPlugin(Star):
                     await event.send(MessageChain([video_component]))
 
             if fc.get("include_top_comments", True) and item.comments:
-                yield event.plain_result("热门评论 Top 3:\n" + self._format_comments_block(item))
+                comments_text = self._format_comments_block(item)
+                if comments_text:
+                    yield event.plain_result("热门评论 Top 3:\n" + comments_text)
 
             if fc.get("include_links", True):
-                yield event.plain_result(self._format_link_block(item))
+                link_text = self._format_link_block(item)
+                if link_text:
+                    yield event.plain_result(link_text)
         finally:
             self._schedule_cleanup_downloaded_files(cleanup_paths)
 
     # ------------------------------------------------------------------ #
     # 文本块构建
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _platform_tag(p: str) -> str:
-        return {
-            "douyin": "[抖音]",
-            "bilibili": "[哔哩哔哩]",
-            "xiaohongshu": "[小红书]",
-        }.get(p, f"[{p}]")
-
     def _format_title_block(self, item: ParsedItem) -> str:
         title = item.title or "(无标题)"
         author = item.author or "未知作者"
-        return f"📖 标题：{title}\n👤 作者：{author}"
+        return f"{_platform_tag(item.platform)} 📖 标题：{title}\n👤 作者：{author}"
 
     @staticmethod
     def _format_desc_block(item: ParsedItem) -> str:
@@ -509,22 +553,70 @@ class ShareForwardPlugin(Star):
         return "\n".join(lines)
 
     def _format_comments_block(self, item: ParsedItem) -> str:
+        """按真正输出的顺序发奖牌，避免第一条为空时从🥈开始。"""
         medals = ["🥇", "🥈", "🥉"]
-        lines = []
-        for idx, c in enumerate(item.comments[:3]):
-            content = (c.get("content") or "").strip()
+        lines: list[str] = []
+        for comment in item.comments:
+            if len(lines) >= 3:
+                break
+            content = (comment.get("content") or "").strip()
             if not content:
                 continue
-            lines.append(f"{medals[idx]} {content}")
+            lines.append(f"{medals[len(lines)]} {content}")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
     # 视频下载
     # ------------------------------------------------------------------ #
+    def _video_cache_key(self, item: ParsedItem) -> str:
+        """用内容 ID 而不是带过期参数的直链做键，重复分享才能复用同一个文件。"""
+        if item.platform == "bilibili":
+            parts = (
+                "bili",
+                item.extra.get("bvid", ""),
+                item.extra.get("cid", ""),
+                item.extra.get("video_quality", ""),
+            )
+        elif item.platform == "douyin":
+            parts = ("dy", item.extra.get("aweme_id", ""), "")
+        else:
+            parts = ("xhs", item.extra.get("note_id", ""), "")
+        identity = "_".join(part for part in parts if part)
+        if identity in ("bili", "dy", "xhs") or not identity:
+            # 没有稳定的内容 ID 时退回直链；直链带签名，基本不会命中缓存。
+            identity = item.video_url or item.canonical_url or item.raw_url
+        return hashlib.sha256(
+            f"{item.platform}|{identity}".encode("utf-8", errors="ignore")
+        ).hexdigest()[:16]
+
     async def _download_video(self, item: ParsedItem) -> Optional[str]:
+        """下载视频；同一内容并发请求只下一次，已下载过的文件直接复用。"""
+        url = item.video_url
+        if not url:
+            return None
+
         max_mb = int(self.config.get("video_max_size_mb", 80) or 80)
         max_bytes = max_mb * 1024 * 1024
-        url = item.video_url
+        tmp_dir = self._get_download_dir()
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        key = self._video_cache_key(item)
+        path = os.path.join(tmp_dir, f"share_fwd_{item.platform}_{key}.mp4")
+        lock = self._download_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                # 刷新 mtime，延迟清理任务据此判断文件刚被复用，不会误删。
+                try:
+                    os.utime(path, None)
+                except OSError:
+                    pass
+                self._dlog(f"复用已下载视频: {path}")
+                return path
+            return await self._download_video_to_path(item, path, max_bytes)
+
+    async def _download_video_to_path(
+        self, item: ParsedItem, path: str, max_bytes: int
+    ) -> Optional[str]:
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -538,85 +630,62 @@ class ShareForwardPlugin(Star):
             if cookie:
                 headers["Cookie"] = cookie.replace("\r", "").replace("\n", "")
 
-        tmp_dir = self._get_download_dir()
-        os.makedirs(tmp_dir, exist_ok=True)
-        digest = hashlib.sha256(url.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        path = os.path.join(tmp_dir, f"share_fwd_{item.platform}_{digest}.mp4")
+        ok = False
         try:
-            async with self._http.stream("GET", url, headers=headers, follow_redirects=True) as r:
-                if r.status_code != 200:
-                    self._dlog(f"视频下载状态码: {r.status_code}")
+            async with self._http.stream(
+                "GET", item.video_url, headers=headers, follow_redirects=True
+            ) as response:
+                if response.status_code != 200:
+                    self._dlog(f"视频下载状态码: {response.status_code}")
                     return None
-                cl = r.headers.get("content-length")
-                if cl and int(cl) > max_bytes:
-                    self._dlog(f"视频体积 {int(cl) / 1024 / 1024:.1f}MB 超限")
-                    return None
+                content_length = response.headers.get("content-length")
+                if content_length and content_length.isdigit():
+                    if int(content_length) > max_bytes:
+                        self._dlog(
+                            f"视频体积 {int(content_length) / 1024 / 1024:.1f}MB 超限"
+                        )
+                        return None
                 size = 0
-                with open(path, "wb") as fp:
-                    async for chunk in r.aiter_bytes(64 * 1024):
+                with open(path, "wb", buffering=_DOWNLOAD_CHUNK_SIZE) as fp:
+                    async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_SIZE):
                         size += len(chunk)
                         if size > max_bytes:
-                            fp.close()
-                            try:
-                                os.remove(path)
-                            except OSError:
-                                pass
                             self._dlog("视频下载中超限，已中止")
                             return None
                         fp.write(chunk)
+            if size <= 0:
+                self._dlog("视频下载结果为空")
+                return None
+            ok = True
             return path
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[share_forward] 视频下载失败: {e}")
             return None
+        finally:
+            # 超时/断流/取消时删掉写了一半的文件，避免下载目录堆积垃圾。
+            if not ok:
+                _safe_unlink(path)
 
     # ------------------------------------------------------------------ #
     # 工具
     # ------------------------------------------------------------------ #
-    def _append_section(
-        self,
-        nodes: List[Comp.Node],
-        bot_uin: str,
-        bot_name: str,
-        title: str,
-    ):
-        """添加分类标题节点，模拟“合并转发内的小分组”。"""
-        nodes.append(
-            Comp.Node(
-                uin=bot_uin,
-                name=bot_name,
-                content=[Comp.Plain(f"【{title}】")],
-            )
-        )
-
-    def _append_plain_node(
-        self,
-        nodes: List[Comp.Node],
-        bot_uin: str,
-        bot_name: str,
-        text: str,
-    ):
-        if not text:
-            return
-        nodes.append(
-            Comp.Node(
-                uin=bot_uin,
-                name=bot_name,
-                content=[Comp.Plain(text)],
-            )
-        )
+    @staticmethod
+    def _group_id(event: AstrMessageEvent) -> str:
+        """不是所有平台的事件都有 message_obj.group_id，统一安全取值。"""
+        message_obj = getattr(event, "message_obj", None)
+        return str(getattr(message_obj, "group_id", "") or "")
 
     def _check_access(self, event: AstrMessageEvent):
         """检查私聊、群聊和统一会话白名单。"""
-        if not self.config.get("enable_in_private", True):
-            group_id = getattr(event.message_obj, "group_id", "") or ""
-            if not group_id:
-                return "BLOCKED"
+        group_id = self._group_id(event)
+
+        if not self.config.get("enable_in_private", True) and not group_id:
+            return "BLOCKED"
 
         group_whitelist = self.config.get("group_whitelist", []) or []
-        group_id = getattr(event.message_obj, "group_id", "") or ""
         if group_whitelist and group_id:
             allowed = {str(x).strip() for x in group_whitelist if str(x).strip()}
-            if str(group_id) not in allowed:
+            if group_id not in allowed:
                 return "BLOCKED"
 
         id_whitelist = self.config.get("id_whitelist", []) or []
@@ -653,12 +722,15 @@ class ShareForwardPlugin(Star):
             text += "\n" + _extract_url_from_json_payload(data)
         return text
 
+    def _debounce_key(self, event: AstrMessageEvent, url: str) -> str:
+        session = getattr(event, "unified_msg_origin", "") or "global"
+        return f"{session}:{url}"
+
     def _is_debounced(self, event: AstrMessageEvent, url: str) -> bool:
         seconds = int(self.config.get("debounce_interval", 120) or 0)
         if seconds <= 0:
             return False
-        session = getattr(event, "unified_msg_origin", "") or "global"
-        key = f"{session}:{url}"
+        key = self._debounce_key(event, url)
         now = time.time()
         expired = [k for k, ts in self._recent_links.items() if now - ts > seconds]
         for k in expired:
@@ -671,10 +743,11 @@ class ShareForwardPlugin(Star):
         seconds = int(self.config.get("debounce_interval", 120) or 0)
         if seconds <= 0:
             return
-        session = getattr(event, "unified_msg_origin", "") or "global"
-        key = f"{session}:{url}"
-        now = time.time()
-        self._recent_links[key] = now
+        self._recent_links[self._debounce_key(event, url)] = time.time()
+
+    def _clear_debounce(self, event: AstrMessageEvent, url: str):
+        """解析失败时撤销记录，避免把用户的正常重试也防抖掉。"""
+        self._recent_links.pop(self._debounce_key(event, url), None)
 
     def _limit_images(self, images: List[str]) -> List[str]:
         max_images = int(self.config.get("max_images_per_forward", 18) or 18)
@@ -688,11 +761,10 @@ class ShareForwardPlugin(Star):
         cleanup_paths: Optional[list[str]] = None,
     ):
         if item.platform == "bilibili":
-            mode = self.config.get("bilibili_video_send_mode", "download")
-        else:
-            mode = self.config.get("video_send_mode", "direct_url")
+            return await self._build_bilibili_video_component(item, cleanup_paths)
 
-        if mode == "off":
+        mode = self.config.get("video_send_mode", "direct_url")
+        if mode == "off" or not item.video_url:
             return None
         if mode == "direct_url":
             try:
@@ -701,14 +773,21 @@ class ShareForwardPlugin(Star):
                 logger.warning(f"[share_forward] URL 视频组件构造失败: {e}")
                 return None
         if mode == "download":
-            video_path = await self._download_video(item)
-            if video_path and self.config.get("cleanup_downloaded_video", True):
-                if cleanup_paths is not None:
-                    cleanup_paths.append(video_path)
-            if item.platform == "bilibili":
-                return self._build_bilibili_download_video_component(video_path)
+            video_path = await self._prepare_downloaded_video(item, cleanup_paths)
             return Comp.Video.fromFileSystem(video_path) if video_path else None
         return None
+
+    async def _prepare_downloaded_video(
+        self, item: ParsedItem, cleanup_paths: Optional[list[str]] = None
+    ) -> Optional[str]:
+        video_path = await self._download_video(item)
+        if (
+            video_path
+            and cleanup_paths is not None
+            and self.config.get("cleanup_downloaded_video", True)
+        ):
+            cleanup_paths.append(video_path)
+        return video_path
 
     def _get_download_dir(self) -> str:
         cfg_dir = (self.config.get("download_video_dir") or "").strip()
@@ -716,25 +795,48 @@ class ShareForwardPlugin(Star):
             return cfg_dir
         return os.path.join(tempfile.gettempdir(), "share_forward_videos")
 
-    def _build_bilibili_download_video_component(self, video_path: Optional[str]):
+    def _resolve_bilibili_access_mode(self) -> str:
+        mode = (self.config.get("bilibili_download_access_mode") or "auto").strip()
+        if mode and mode != "auto":
+            return mode
+        if (self.config.get("bilibili_file_server_base_url") or "").strip():
+            return "http_server"
+        if (self.config.get("bilibili_shared_video_dir") or "").strip():
+            return "shared_dir"
+        return "off"
+
+    def _warn_bilibili_access_once(self) -> None:
+        if self._warned_bilibili_access:
+            return
+        self._warned_bilibili_access = True
+        logger.warning(
+            "[share_forward] B站视频为 download 模式，但既没有配置 "
+            "bilibili_file_server_base_url，也没有配置 bilibili_shared_video_dir，"
+            "NapCat 用不了本地文件，已直接跳过视频节点（不会再白下载一遍）。"
+            "请按 README 配置其中一种访问方式。"
+        )
+
+    async def _build_bilibili_video_component(
+        self, item: ParsedItem, cleanup_paths: Optional[list[str]] = None
+    ):
+        if not item.video_url:
+            return None
+        if self.config.get("bilibili_video_send_mode", "download") == "off":
+            return None
+
+        # 先判访问方式再决定要不要下载：旧版会先下完几十 MB 再因为“没配置访问方式”把文件丢掉。
+        access_mode = self._resolve_bilibili_access_mode()
+        if access_mode == "off":
+            self._warn_bilibili_access_once()
+            return None
+
+        video_path = await self._prepare_downloaded_video(item, cleanup_paths)
         if not video_path:
             return None
 
-        access_mode = self.config.get("bilibili_download_access_mode", "auto")
-        if access_mode == "auto":
-            if (self.config.get("bilibili_file_server_base_url") or "").strip():
-                access_mode = "http_server"
-            elif (self.config.get("bilibili_shared_video_dir") or "").strip():
-                access_mode = "shared_dir"
-            else:
-                access_mode = "off"
-
-        if access_mode == "http_server":
-            url = self._build_video_http_url(video_path)
-            if url:
-                return Comp.Video.fromURL(url)
-            self._dlog("B站 HTTP 文件服务不可用，已跳过视频文件节点")
-            return None
+        if access_mode == "local_file":
+            # 仅适合 AstrBot 与 NapCat 在同一文件系统/同一容器时使用。
+            return Comp.Video.fromFileSystem(video_path)
 
         if access_mode == "shared_dir":
             path = self._build_shared_video_path(video_path)
@@ -743,15 +845,10 @@ class ShareForwardPlugin(Star):
             self._dlog("B站共享目录路径不可用，已跳过视频文件节点")
             return None
 
-        if access_mode == "local_file":
-            # 仅适合 AstrBot 与 NapCat 在同一文件系统/同一容器时使用。
-            return Comp.Video.fromFileSystem(video_path)
-
-        logger.warning(
-            "[share_forward] B站 download 已下载视频，但未配置跨容器访问方式；"
-            "请配置 bilibili_file_server_base_url 或 bilibili_shared_video_dir，"
-            "否则将只保留链接信息并跳过视频文件节点"
-        )
+        url = self._build_video_http_url(video_path)
+        if url:
+            return Comp.Video.fromURL(url)
+        self._dlog("B站 HTTP 文件服务不可用，已跳过视频文件节点")
         return None
 
     def _build_video_http_url(self, video_path: str) -> Optional[str]:
@@ -821,11 +918,18 @@ class ShareForwardPlugin(Star):
     def _cleanup_downloaded_files(self, paths: list[str]):
         if not self.config.get("cleanup_downloaded_video", True):
             return
+        delay = int(self.config.get("cleanup_downloaded_video_delay", 600) or 600)
+        now = time.time()
         for path in paths:
             try:
-                if path and os.path.exists(path):
-                    os.remove(path)
-                    self._dlog(f"已清理下载视频: {path}")
+                if not path or not os.path.exists(path):
+                    continue
+                # 文件刚被其他会话复用过（mtime 被刷新）就再等等，别把正在发送的文件删了。
+                if delay > 0 and now - os.path.getmtime(path) < delay:
+                    self._dlog(f"视频刚被复用，跳过本次清理: {path}")
+                    continue
+                os.remove(path)
+                self._dlog(f"已清理下载视频: {path}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[share_forward] 清理下载视频失败: {path}, {e}")
 
@@ -841,7 +945,7 @@ def _extract_url_from_json_payload(payload: Any) -> str:
         try:
             data = json.loads(payload)
         except Exception:  # noqa: BLE001
-            m = _RE_SUPPORTED_SHARE_URL.search(payload)
+            m = SUPPORTED_SHARE_URL.search(payload)
             return m.group(0) if m else ""
     elif isinstance(payload, (dict, list)):
         data = payload
@@ -854,7 +958,7 @@ def _extract_url_from_json_payload(payload: Any) -> str:
         if isinstance(obj, dict):
             value = obj.get(key)
             if isinstance(value, str):
-                m = _RE_SUPPORTED_SHARE_URL.search(value)
+                m = SUPPORTED_SHARE_URL.search(value)
                 if m:
                     return m.group(0)
             for child in obj.values():
@@ -877,7 +981,7 @@ def _extract_url_from_json_payload(payload: Any) -> str:
 
     def walk(obj: Any):
         if isinstance(obj, str):
-            m = _RE_SUPPORTED_SHARE_URL.search(obj)
+            m = SUPPORTED_SHARE_URL.search(obj)
             if m:
                 found_urls.append(m.group(0))
         elif isinstance(obj, dict):

@@ -14,19 +14,10 @@ from typing import Optional
 from urllib.parse import unquote
 
 from .base import BaseParser, ParsedItem, ParseError
+from .patterns import DOUYIN_LINK
 
 
-_RE_DOUYIN_LINK = re.compile(
-    r"(?:https?://)?(?:"
-    r"v\.douyin\.com/[A-Za-z0-9_\-]+/?|"
-    r"(?:www\.)?iesdouyin\.com/share/(?:video|note)/\d+/?|"
-    r"(?:www\.)?douyin\.com/(?:video|note|user)/[\w\-]+|"
-    r"(?:www\.)?douyin\.com/discover\?modal_id=\d+"
-    r")",
-    re.IGNORECASE,
-)
-
-_RE_AWEME_ID = re.compile(r"(?:video|note|modal_id=)/?(\d{10,25})")
+_RE_AWEME_ID = re.compile(r"(?:video|note)/?(\d{10,25})|modal_id=(\d{10,25})")
 
 _HEADERS_DESKTOP = {
     "User-Agent": (
@@ -51,44 +42,33 @@ class DouyinParser(BaseParser):
     platform = "douyin"
 
     async def can_parse(self, url: str) -> bool:
-        return bool(_RE_DOUYIN_LINK.search(url))
+        return bool(DOUYIN_LINK.search(url))
 
     async def parse(self, url: str) -> ParsedItem:
-        m = _RE_DOUYIN_LINK.search(url)
+        m = DOUYIN_LINK.search(url)
         if not m:
             raise ParseError("not douyin")
         page_url = m.group(0)
         if not page_url.startswith("http"):
             page_url = "https://" + page_url
 
-        # 1. 跟随短链。参考 astrbot_plugin_douyin_bot：优先 HEAD，失败再 GET。
+        # 1. 直接 GET 一次：短链会跳转到 iesdouyin 分享页，响应体里通常已经带着
+        #    _ROUTER_DATA，省掉旧版“先 HEAD 再 GET 分享页”的第二次请求。
         try:
-            try:
-                resp = await self.http.head(
-                    page_url, headers=_HEADERS_MOBILE, follow_redirects=True
-                )
-            except Exception:  # noqa: BLE001
-                resp = await self.http.get(
-                    page_url, headers=_HEADERS_MOBILE, follow_redirects=True
-                )
-            final_url = str(resp.url)
+            response = await self.http.get(
+                page_url, headers=_HEADERS_MOBILE, follow_redirects=True
+            )
         except Exception as e:  # noqa: BLE001
-            raise ParseError(f"抖音短链跳转失败: {e}") from e
+            raise ParseError(f"抖音链接访问失败: {e}") from e
+
+        final_url = str(response.url)
+        html = response.text if response.status_code == 200 else ""
 
         aweme_id = _extract_aweme_id(final_url) or _extract_aweme_id(page_url)
         if not aweme_id:
             raise ParseError("未能从链接中提取 aweme_id")
 
-        # 2. 抓 share 页 HTML。iesdouyin 分享页对移动端 UA 更容易返回内嵌数据。
         share_url = f"https://www.iesdouyin.com/share/video/{aweme_id}/"
-        try:
-            r = await self.http.get(
-                share_url, headers=_HEADERS_MOBILE, follow_redirects=True
-            )
-            html = r.text
-        except Exception as e:  # noqa: BLE001
-            raise ParseError(f"share 页抓取失败: {e}") from e
-
         item = ParsedItem(
             platform="douyin",
             raw_url=url,
@@ -96,33 +76,20 @@ class DouyinParser(BaseParser):
             extra={"aweme_id": aweme_id},
         )
 
-        # 第一优先级：完全复刻 astrbot_plugin_douyin_bot 的 loaderData 路径。
-        detail = _extract_drdon_style_detail(html)
+        # 第一优先级：复刻 astrbot_plugin_douyin_bot 的 loaderData 路径。
+        detail = _extract_drdon_style_detail(html) or _extract_router_detail(html)
         if not detail:
-            detail = _extract_router_detail(html)
+            detail = await self._fetch_detail_from(share_url)
         if not detail:
-            # 兜底：再试 note 路径
-            try:
-                r = await self.http.get(
-                    f"https://www.iesdouyin.com/share/note/{aweme_id}/",
-                    headers=_HEADERS_MOBILE,
-                    follow_redirects=True,
-                )
-                detail = _extract_router_detail(r.text)
-            except Exception:  # noqa: BLE001
-                detail = None
-
+            # 兜底：图文作品走 note 路径
+            detail = await self._fetch_detail_from(
+                f"https://www.iesdouyin.com/share/note/{aweme_id}/"
+            )
         if not detail:
-            # 兜底：尝试抖音桌面视频页，新版页面有时只在 douyin.com/video 中下发 RENDER_DATA。
-            try:
-                r = await self.http.get(
-                    f"https://www.douyin.com/video/{aweme_id}",
-                    headers=_HEADERS_DESKTOP,
-                    follow_redirects=True,
-                )
-                detail = _extract_router_detail(r.text)
-            except Exception:  # noqa: BLE001
-                detail = None
+            # 兜底：桌面视频页，部分环境才下发 RENDER_DATA
+            detail = await self._fetch_detail_from(
+                f"https://www.douyin.com/video/{aweme_id}", headers=_HEADERS_DESKTOP
+            )
 
         if not detail:
             # 最后兜底：旧 iteminfo 接口，部分环境仍可匿名返回基础信息。
@@ -222,13 +189,28 @@ class DouyinParser(BaseParser):
 
         return item
 
+    async def _fetch_detail_from(
+        self, page_url: str, headers: Optional[dict] = None
+    ) -> Optional[dict]:
+        """抓一页 HTML 并尝试取出作品详情；失败只会返回 None，不打断兜底链。"""
+        try:
+            response = await self.http.get(
+                page_url, headers=headers or _HEADERS_MOBILE, follow_redirects=True
+            )
+        except Exception as e:  # noqa: BLE001
+            self.logger.debug(f"[douyin] {page_url} 抓取失败: {e}")
+            return None
+        return _extract_drdon_style_detail(response.text) or _extract_router_detail(
+            response.text
+        )
+
 
 def _extract_aweme_id(url: str) -> Optional[str]:
     if not url:
         return None
     m = _RE_AWEME_ID.search(url)
     if m:
-        return m.group(1)
+        return m.group(1) or m.group(2)
     # modal_id 在 query
     m2 = re.search(r"modal_id=(\d{10,25})", url)
     if m2:

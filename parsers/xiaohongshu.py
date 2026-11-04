@@ -12,15 +12,8 @@ import re
 from typing import Optional, Tuple
 
 from .base import BaseParser, ParsedItem, ParseError
+from .patterns import XIAOHONGSHU_LINK
 
-
-_RE_XHS = re.compile(
-    r"(?:https?://)?(?:"
-    r"xhslink\.com/[A-Za-z0-9/_\-]+|"
-    r"(?:www\.)?xiaohongshu\.com/(?:explore|discovery/item)/[A-Za-z0-9]+[^\s]*"
-    r")",
-    re.IGNORECASE,
-)
 
 _RE_NOTE_ID = re.compile(r"/(?:explore|discovery/item)/([A-Za-z0-9]+)")
 _RE_XSEC = re.compile(r"xsec_token=([^&\s]+)")
@@ -47,10 +40,10 @@ class XiaohongshuParser(BaseParser):
     platform = "xiaohongshu"
 
     async def can_parse(self, url: str) -> bool:
-        return bool(_RE_XHS.search(url))
+        return bool(XIAOHONGSHU_LINK.search(url))
 
     async def parse(self, url: str) -> ParsedItem:
-        m = _RE_XHS.search(url)
+        m = XIAOHONGSHU_LINK.search(url)
         if not m:
             raise ParseError("not xiaohongshu")
         page_url = m.group(0)
@@ -89,7 +82,7 @@ class XiaohongshuParser(BaseParser):
         except Exception as e:  # noqa: BLE001
             raise ParseError(f"小红书页面抓取失败: {e}") from e
 
-        if "您访问的页面不见了" in html or "登录" in html and "captcha" in html.lower():
+        if "您访问的页面不见了" in html or ("登录" in html and "captcha" in html.lower()):
             raise ParseError("小红书页面被风控/要求登录，请刷新 Cookie。")
 
         m2 = _RE_INITIAL.search(html)

@@ -3,13 +3,15 @@ import re
 import unittest
 from pathlib import Path
 
+from parsers.patterns import SUPPORTED_SHARE_URL
+
 
 MAIN = Path(__file__).parents[1] / "main.py"
 
 
 def _load_extractor():
     tree = ast.parse(MAIN.read_text(encoding="utf-8"))
-    wanted = {"_RE_SUPPORTED_SHARE_URL", "_CARD_URL_KEYS"}
+    wanted = {"_CARD_URL_KEYS"}
     nodes = [
         node
         for node in tree.body
@@ -19,7 +21,12 @@ def _load_extractor():
         )
         or (isinstance(node, ast.FunctionDef) and node.name == "_extract_url_from_json_payload")
     ]
-    namespace = {"re": re, "json": __import__("json"), "Any": object}
+    namespace = {
+        "re": re,
+        "json": __import__("json"),
+        "Any": object,
+        "SUPPORTED_SHARE_URL": SUPPORTED_SHARE_URL,
+    }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(MAIN), "exec"), namespace)
     return namespace["_extract_url_from_json_payload"]
 
@@ -70,6 +77,16 @@ class JsonCardUrlExtractionTests(unittest.TestCase):
         )
 
         self.assertEqual(extract_url(payload), "https://b23.tv/hj9Stu2")
+
+    def test_card_pointing_at_live_page_is_not_treated_as_video(self):
+        card = {"meta": {"detail_1": {"qqdocurl": "https://live.bilibili.com/123"}}}
+
+        self.assertEqual(extract_url(card), "")
+
+    def test_card_with_xiaohongshu_short_link_is_extracted(self):
+        card = {"meta": {"detail_1": {"qqdocurl": "https://xhslink.com/a1b2c3"}}}
+
+        self.assertEqual(extract_url(card), "https://xhslink.com/a1b2c3")
 
 
 if __name__ == "__main__":
