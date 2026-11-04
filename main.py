@@ -13,7 +13,7 @@ import threading
 import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from typing import List, Optional
+from typing import Any, List, Optional
 from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
@@ -38,6 +38,19 @@ _RE_URL = re.compile(
     r"(?:v\.douyin\.com|b23\.tv|xhslink\.com)/[A-Za-z0-9_\-/]+)",
     re.IGNORECASE,
 )
+
+_RE_SUPPORTED_SHARE_URL = re.compile(
+    r"(?:https?://)?(?:"
+    r"(?:www\.|m\.)?bilibili\.com/[^\s\u4e00-\u9fa5\"'<>]+|"
+    r"b23\.tv/[A-Za-z0-9]+|"
+    r"v\.douyin\.com/[A-Za-z0-9_\-/]+|"
+    r"xhslink\.com/[A-Za-z0-9_\-/]+|"
+    r"(?:www\.)?xiaohongshu\.com/[^\s\u4e00-\u9fa5\"'<>]+"
+    r")",
+    re.IGNORECASE,
+)
+
+_CARD_URL_KEYS = ("qqdocurl", "jumpUrl", "jump_url", "sourceUrl", "source_url", "url")
 
 
 class _ShareForwardVideoHandler(SimpleHTTPRequestHandler):
@@ -71,9 +84,9 @@ class _ShareForwardVideoHandler(SimpleHTTPRequestHandler):
 
 @register(
     "astrbot_plugin_share_forward",
-    "TRAE",
+    "TRAE / Yamabuki-Kirio",
     "把抖音/B站/小红书分享链接解析后打包成 QQ 合并转发",
-    "1.1.4",
+    "1.1.5",
 )
 class ShareForwardPlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -807,22 +820,52 @@ class ShareForwardPlugin(Star):
             logger.info(f"[share_forward] {msg}")
 
 
-def _extract_url_from_json_payload(payload: str) -> str:
+def _extract_url_from_json_payload(payload: Any) -> str:
     if not payload:
         return ""
-    if _RE_URL.search(payload):
-        return _RE_URL.search(payload).group(0)
-    try:
-        data = json.loads(payload)
-    except Exception:  # noqa: BLE001
+    if isinstance(payload, str):
+        try:
+            data = json.loads(payload)
+        except Exception:  # noqa: BLE001
+            m = _RE_SUPPORTED_SHARE_URL.search(payload)
+            return m.group(0) if m else ""
+    elif isinstance(payload, (dict, list)):
+        data = payload
+    else:
         return ""
-    found: list[str] = []
 
-    def walk(obj):
+    # QQ cards also contain icon/preview image URLs. Prefer the semantic jump
+    # fields so an image URL cannot hide the actual share target.
+    def find_key(obj: Any, key: str) -> str:
+        if isinstance(obj, dict):
+            value = obj.get(key)
+            if isinstance(value, str):
+                m = _RE_SUPPORTED_SHARE_URL.search(value)
+                if m:
+                    return m.group(0)
+            for child in obj.values():
+                found = find_key(child, key)
+                if found:
+                    return found
+        elif isinstance(obj, list):
+            for child in obj:
+                found = find_key(child, key)
+                if found:
+                    return found
+        return ""
+
+    for key in _CARD_URL_KEYS:
+        found = find_key(data, key)
+        if found:
+            return found
+
+    found_urls: list[str] = []
+
+    def walk(obj: Any):
         if isinstance(obj, str):
-            m = _RE_URL.search(obj)
+            m = _RE_SUPPORTED_SHARE_URL.search(obj)
             if m:
-                found.append(m.group(0))
+                found_urls.append(m.group(0))
         elif isinstance(obj, dict):
             for v in obj.values():
                 walk(v)
@@ -831,4 +874,4 @@ def _extract_url_from_json_payload(payload: str) -> str:
                 walk(v)
 
     walk(data)
-    return found[0] if found else ""
+    return found_urls[0] if found_urls else ""
