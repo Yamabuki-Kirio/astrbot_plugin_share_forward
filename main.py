@@ -128,7 +128,7 @@ class _ShareForwardVideoHandler(SimpleHTTPRequestHandler):
     "astrbot_plugin_share_forward",
     "TRAE / Yamabuki-Kirio",
     "把抖音/B站/小红书分享链接解析后打包成 QQ 合并转发",
-    "1.1.11",
+    "1.1.12",
 )
 class ShareForwardPlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -312,6 +312,24 @@ class ShareForwardPlugin(Star):
             async for chain in self._send_fallback(event, item):
                 yield chain
 
+    def _content_flags(self, item: ParsedItem) -> tuple[bool, bool]:
+        """返回 (是否发送正文/简介节点, 是否发送封面/图集节点)。
+
+        打开 `forward_content.exclusive_desc_cover` 后，简介和封面/图集只发一个：
+        有简介就只发简介，没有简介才发封面/图集。
+        """
+        fc = self.config.get("forward_content", {}) or {}
+        desc = _desc_text(item)
+        desc_sent = (
+            bool(fc.get("include_text_desc", True))
+            and bool(desc)
+            and desc != item.title
+        )
+        cover_sent = bool(fc.get("include_cover", True))
+        if cover_sent and desc_sent and fc.get("exclusive_desc_cover", False):
+            cover_sent = False
+        return desc_sent, cover_sent
+
     async def _send_forward(self, event: AstrMessageEvent, item: ParsedItem):
         """构造并发送 QQ 合并转发"""
         bot_uin = str(event.get_self_id() or "10000")
@@ -344,14 +362,17 @@ class ShareForwardPlugin(Star):
                 nodes, bot_uin, bot_name, "📌 解析信息", self._format_title_block(item)
             )
 
+        desc_sent, cover_sent = self._content_flags(item)
+
         # 2) 正文内容
-        desc = _desc_text(item)
-        if fc.get("include_text_desc", True) and desc and desc != item.title:
+        if desc_sent:
             section_title = "📝 简介" if item.platform == "bilibili" else "📝 正文内容"
-            _add_text_section(nodes, bot_uin, bot_name, section_title, desc)
+            _add_text_section(
+                nodes, bot_uin, bot_name, section_title, _desc_text(item)
+            )
 
         # 3) 图片内容
-        if fc.get("include_cover", True):
+        if cover_sent:
             if item.item_type == "images" and item.images:
                 _append_section(nodes, bot_uin, bot_name, "🖼️ 图片内容")
                 images = self._limit_images(item.images)
@@ -436,13 +457,14 @@ class ShareForwardPlugin(Star):
         if fc.get("include_title_author", True):
             _append_plain_node(nodes, bot_uin, bot_name, self._format_title_block(item))
 
-        desc = _desc_text(item)
-        if fc.get("include_text_desc", True) and desc and desc != item.title:
+        desc_sent, cover_sent = self._content_flags(item)
+
+        if desc_sent:
             _append_plain_node(
                 nodes, bot_uin, bot_name, self._format_desc_block(item)
             )
 
-        if fc.get("include_cover", True):
+        if cover_sent:
             if item.item_type == "images" and item.images:
                 images = self._limit_images(item.images)
                 for idx, img in enumerate(images, 1):
@@ -506,14 +528,15 @@ class ShareForwardPlugin(Star):
         fc = self.config.get("forward_content", {}) or {}
         cleanup_paths: list[str] = []
         try:
+            desc_sent, cover_sent = self._content_flags(item)
+
             # 头部信息
             if fc.get("include_title_author", True):
                 yield event.plain_result(self._format_title_block(item))
-            desc = _desc_text(item)
-            if fc.get("include_text_desc", True) and desc and desc != item.title:
+            if desc_sent:
                 yield event.plain_result(self._format_desc_block(item))
 
-            if fc.get("include_cover", True):
+            if cover_sent:
                 if item.item_type == "images":
                     for img in self._limit_images(item.images):
                         await event.send(MessageChain([Comp.Image.fromURL(img)]))

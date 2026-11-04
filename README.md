@@ -64,7 +64,7 @@
 | `notify_when_triggered` | 识别到可解析链接后先发送触发提示 |
 | `forward_grouping_mode` | 合并转发分组模式：`sectioned` 分类模式 / `flat` 旧版平铺模式 |
 | `platforms` | 启用哪些平台（抖音 / B 站 / 小红书） |
-| `forward_content` | 选择标题作者、封面/图集、视频文件、链接、热门评论、正文/简介；合并转发和普通发送都生效 |
+| `forward_content` | 选择标题作者、封面/图集、视频文件、链接、热门评论、正文/简介；合并转发和普通发送都生效。`exclusive_desc_cover` 打开后简介与封面/图集二选一：有简介就只发简介，没有才发封面/图集 |
 | `use_forward_message` | 是否使用 QQ 合并转发，不稳定时可关闭 |
 | `video_send_mode` | 抖音/小红书视频发送模式：`direct_url` / `download` / `off` |
 | `bilibili_video_send_mode` | B 站视频发送模式：`download` / `off`，默认 `download` |
