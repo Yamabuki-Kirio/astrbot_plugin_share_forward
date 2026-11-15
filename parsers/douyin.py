@@ -119,24 +119,9 @@ class DouyinParser(BaseParser):
 
         # 视频
         video = detail.get("video") or {}
-        play_addr = (
-            video.get("play_addr_h264") or video.get("play_addr") or {}
-        )
-        url_list = play_addr.get("url_list") or []
-        if url_list:
-            # 把 playwm 替换为 play 拿无水印（旧策略，2025 年仍部分有效）
-            best = url_list[0].replace("playwm", "play")
-            item.video_url = best
+        if video and not detail.get("images"):
+            item.video_url = await self._resolve_video_url(video, aweme_id)
             item.video_referer = "https://www.douyin.com/"
-        else:
-            # 参考 astrbot_plugin_douyin_bot：部分页面只给 play_addr.uri。
-            uri = play_addr.get("uri") or video.get("play_addr", {}).get("uri")
-            if uri:
-                if str(uri).startswith("http"):
-                    item.video_url = str(uri)
-                else:
-                    item.video_url = f"https://www.douyin.com/aweme/v1/play/?video_id={uri}"
-                item.video_referer = "https://www.douyin.com/"
 
         cover_obj = video.get("cover") or video.get("origin_cover") or {}
         cover_list = cover_obj.get("url_list") or []
@@ -191,6 +176,62 @@ class DouyinParser(BaseParser):
 
         return item
 
+    async def _resolve_video_url(self, video: dict, aweme_id: str) -> str:
+        """验证页面地址；旧播放接口失效时取同一作品的 CDN 地址。"""
+        tried = set()
+
+        async def select(source):
+            for url in _video_candidates(source):
+                if url in tried:
+                    continue
+                tried.add(url)
+                if await self._is_video_url(url):
+                    return url
+            return ""
+
+        url = await select(video)
+        if url:
+            return url
+        for host in ("api5-normal-c-hl.amemv.com", "aweme.snssdk.com"):
+            try:
+                response = await self.http.get(
+                    f"https://{host}/aweme/v1/feed/",
+                    params={"aweme_id": aweme_id, "aid": "1128"},
+                    headers=_HEADERS_MOBILE,
+                    follow_redirects=True,
+                )
+                if response.status_code != 200:
+                    continue
+                # feed 可能同时返回推荐作品，必须按 ID 精确筛选。
+                for detail in response.json().get("aweme_list") or []:
+                    if str(detail.get("aweme_id")) != str(aweme_id):
+                        continue
+                    url = await select(detail.get("video") or {})
+                    if url:
+                        return url
+            except Exception as e:  # noqa: BLE001
+                self.logger.debug(f"[douyin] 视频地址兜底失败: {type(e).__name__}")
+        raise ParseError("未能获取可下载的抖音视频地址，请稍后重试")
+
+    async def _is_video_url(self, url: str) -> bool:
+        try:
+            async with self.http.stream(
+                "GET", url,
+                headers={**_HEADERS_MOBILE, "Range": "bytes=0-4095"},
+                follow_redirects=True,
+            ) as response:
+                if response.status_code not in (200, 206):
+                    return False
+                # 只读文件头，即使服务端忽略 Range 也不会预下载整个视频。
+                prefix = b""
+                async for chunk in response.aiter_bytes(chunk_size=32):
+                    prefix += chunk
+                    if len(prefix) >= 12:
+                        return prefix[4:8] == b"ftyp"
+        except Exception as e:  # noqa: BLE001
+            self.logger.debug(f"[douyin] 视频地址验证失败: {type(e).__name__}")
+        return False
+
     async def _fetch_detail_from(
         self, page_url: str, headers: Optional[dict] = None
     ) -> Optional[dict]:
@@ -205,6 +246,21 @@ class DouyinParser(BaseParser):
         return _extract_drdon_style_detail(response.text) or _extract_router_detail(
             response.text
         )
+
+
+def _video_candidates(video: dict):
+    """优先 H.264，保留 CDN 签名与备用地址，不凭 uri 拼过时接口。"""
+    seen = set()
+    for key in ("play_addr_h264", "play_addr"):
+        addr = video.get(key) or {}
+        for url in addr.get("url_list") or []:
+            if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+                continue
+            # 只改旧接口路径，绝不改 CDN 路径或签名参数。
+            for candidate in (url.replace("/aweme/v1/playwm/", "/aweme/v1/play/"), url):
+                if candidate not in seen:
+                    seen.add(candidate)
+                    yield candidate
 
 
 def _extract_aweme_id(url: str) -> Optional[str]:

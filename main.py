@@ -128,7 +128,7 @@ class _ShareForwardVideoHandler(SimpleHTTPRequestHandler):
     "astrbot_plugin_share_forward",
     "TRAE / Yamabuki-Kirio",
     "把抖音/B站/小红书分享链接解析后打包成 QQ 合并转发",
-    "1.1.12",
+    "1.1.13",
 )
 class ShareForwardPlugin(Star):
     def __init__(self, context: Context, config: dict):
