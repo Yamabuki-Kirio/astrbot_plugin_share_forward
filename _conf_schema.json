@@ -5,6 +5,12 @@
     "default": true,
     "hint": "总开关。关闭后不会处理任何分享链接。"
   },
+  "xiaohongshu_cover_text": {
+    "description": "小红书直接发送封面和正文",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，小红书发送一条普通图文消息：封面图、标题和正文。图文笔记取首图；此模式独立于合并转发及其内容开关，不发送其余图片、视频、评论或链接。关闭后恢复原有发送方式。"
+  },
   "use_forward_message": {
     "description": "是否使用 QQ 合并转发",
     "type": "bool",

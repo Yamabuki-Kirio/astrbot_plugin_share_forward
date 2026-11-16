@@ -303,6 +303,9 @@ class ShareForwardPlugin(Star):
     # 消息构建
     # ------------------------------------------------------------------ #
     async def _dispatch_send(self, event: AstrMessageEvent, item: ParsedItem):
+        if item.platform == "xiaohongshu" and self.config.get("xiaohongshu_cover_text", True):
+            await self._send_xiaohongshu_cover_text(event, item)
+            return
         platform_name = event.get_platform_name() or ""
         use_forward = self.config.get("use_forward_message", True)
         if platform_name == "aiocqhttp" and use_forward:
@@ -311,6 +314,21 @@ class ShareForwardPlugin(Star):
         else:
             async for chain in self._send_fallback(event, item):
                 yield chain
+
+    async def _send_xiaohongshu_cover_text(self, event: AstrMessageEvent, item: ParsedItem):
+        """小红书使用一条普通图文消息，封面在前，标题和正文在后。"""
+        parts = []
+        cover = item.cover or next((image for image in item.images if image), "")
+        if cover:
+            parts.append(Comp.Image.fromURL(cover))
+        title = clean_text(item.title)
+        desc = _desc_text(item)
+        text = "\n\n".join(value for value in (title, desc if desc != title else "") if value)
+        if text:
+            parts.append(Comp.Plain(text))
+        if not parts:
+            raise ParseError("未获取到小红书封面或正文")
+        await event.send(MessageChain(parts))
 
     def _content_flags(self, item: ParsedItem) -> tuple[bool, bool]:
         """返回 (是否发送正文/简介节点, 是否发送封面/图集节点)。

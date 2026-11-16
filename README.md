@@ -1,8 +1,37 @@
 # astrbot_plugin_share_forward
 
 > 自动识别群聊/私聊里发出的 **抖音 / 哔哩哔哩 / 小红书** 分享链接，
-> 解析其内容（标题、作者、正文、视频、图集、高赞评论），并打包成一条
-> **QQ 合并转发** 消息发送回去。
+> 解析标题、作者、正文、视频、图集和高赞评论。小红书默认发送一条
+> **封面图＋标题＋正文** 的普通消息；抖音和 B 站默认使用 **QQ 合并转发**。
+
+## 小红书图文消息
+
+从 **v1.1.14** 起，识别到小红书链接后，默认将图片和文字放在**同一条消息**里，图片在前、正文在后：
+
+```text
+[封面图片]
+笔记标题
+
+笔记正文
+```
+
+- 图文笔记取第一张图片，视频笔记取视频封面；此模式只发送这一张图片。
+- 标题与正文完全相同时只显示一次，正文保留原有换行。
+- 没有封面时发送文字，没有文字时发送封面。
+- 不附加作者、热门评论、链接、其余图片或视频文件。
+- 默认开启 `xiaohongshu_cover_text`（「小红书直接发送封面和正文」），独立于 `use_forward_message` 和 `forward_content`。关闭后恢复原有发送流程。
+- `notify_when_triggered` 开启时仍会提前发送一条触发提示。若只想收到最终图文消息，请关闭此开关。
+
+小红书仍需配置 `xiaohongshu_cookie`，至少包含 `a1=...`。支持文本分享链接及 QQ JSON 分享卡片中的小红书链接。
+
+### v1.1.14 更新
+
+- 新增小红书同一条消息发送封面和正文的模式，默认开启；其他平台发送方式保持不变。
+- 修复小红书 `INITIAL_STATE` 中 `undefined` 导致的解析失败，兼容空白和数组中的值，保留字符串原文。
+- 支持状态数据中的 `new Date(...)`、`new Map(...)` 和 `new Set(...)`，只转换支持的数据格式，不执行页面脚本。
+- 兼容状态赋值末尾的分号，并为仍不支持的格式保留诊断信息。
+
+升级后请**完整重启 AstrBot 进程或容器**，确保解析器子模块重新加载。
 
 ## ✨ 功能特性
 
@@ -19,7 +48,8 @@
     - 画质探测与热评并行请求，常见情况 1~2 次 playurl 请求即可定档
   - 小红书（`xhslink.com` / `xiaohongshu.com/explore/...`）
     - 图文、视频笔记
-    - 高赞评论 Top 3
+    - 默认同一条普通消息发送封面、标题和正文
+    - 关闭 `xiaohongshu_cover_text` 后可按原有配置发送图集、视频和高赞评论 Top 3
 - 合并转发节点可自定义：
   - 标题 + 作者 + 平台标签
   - 封面图 / 图集
@@ -27,13 +57,13 @@
   - 原始链接 + 无水印直链
   - 高赞评论 Top 3
   - 正文/动态描述
-- 仅 QQ 平台（`aiocqhttp`）使用合并转发，其他平台自动降级为多条普通消息；两种发送路径都遵守内容节点开关。
+- 小红书默认使用上述图文消息模式。其余发送流程中，仅 QQ 平台（`aiocqhttp`）使用合并转发，其他平台自动降级为多条普通消息；这两种路径都遵守内容节点开关。
 - 支持纯 QQ JSON 卡片消息：即使消息没有文本内容，也会优先从 `qqdocurl` 等真实跳转字段提取受支持平台链接。
 - 默认识别到可解析链接后先发送 `解析bot为您服务 ٩( 'ω' )و`，便于判断插件是否触发。
 - 合并转发默认按内容分类展示：📌解析信息、📝正文内容、🖼️图片内容、🎬视频内容、💬热门评论、🔗链接信息。
 - 支持同链接防抖、解析重试、代理、群/会话白名单、私聊开关。
 - 支持视频发送模式：
-  - 抖音/小红书：使用全局 `video_send_mode`，支持 `direct_url` / `download` / `off`
+  - 抖音及关闭 `xiaohongshu_cover_text` 后的小红书：使用全局 `video_send_mode`，支持 `direct_url` / `download` / `off`
   - B 站：使用独立 `bilibili_video_send_mode`，只支持 `download` / `off`
   - B 站默认 `download`，插件先下载视频，再通过插件内置 HTTP 文件服务或共享目录交给 NapCat，避免跨容器 `/tmp` 路径不可见。
   - `download` 模式下载的临时视频默认会延迟清理，避免 NapCat 尚未读取文件就被删除。
@@ -65,9 +95,9 @@
 | `notify_when_triggered` | 识别到可解析链接后先发送触发提示 |
 | `forward_grouping_mode` | 合并转发分组模式：`sectioned` 分类模式 / `flat` 旧版平铺模式 |
 | `platforms` | 启用哪些平台（抖音 / B 站 / 小红书） |
-| `forward_content` | 选择标题作者、封面/图集、视频文件、链接、热门评论、正文/简介；合并转发和普通发送都生效。`exclusive_desc_cover` 打开后简介与封面/图集二选一：有简介就只发简介，没有才发封面/图集 |
+| `forward_content` | 选择标题作者、封面/图集、视频文件、链接、热门评论、正文/简介；合并转发和普通降级发送都生效，小红书直接图文模式除外。`exclusive_desc_cover` 打开后简介与封面/图集二选一：有简介就只发简介，没有才发封面/图集 |
 | `use_forward_message` | 是否使用 QQ 合并转发，不稳定时可关闭 |
-| `video_send_mode` | 抖音/小红书视频发送模式：`direct_url` / `download` / `off` |
+| `video_send_mode` | 抖音及关闭直接图文模式后的小红书视频发送模式：`direct_url` / `download` / `off` |
 | `bilibili_video_send_mode` | B 站视频发送模式：`download` / `off`，默认 `download` |
 | `bilibili_download_access_mode` | B 站下载视频访问方式：`auto` / `http_server` / `shared_dir` / `local_file` |
 | `bilibili_file_server_base_url` | NapCat 访问 AstrBot 插件内置视频文件服务的地址，例如 `http://astrbot:6186` 或 `http://172.18.0.4:6186` |
@@ -90,6 +120,7 @@
 | `douyin_cookie` | 抖音 Cookie（拉取评论用，可选） |
 | `bilibili_cookie` | B站 Cookie（可选，用于提升热评获取成功率） |
 | `xiaohongshu_cookie` | 小红书 Cookie（**必填**，至少含 `a1=...`） |
+| `xiaohongshu_cover_text` | 默认开启：小红书直接发送一条封面图＋标题和正文消息，图文取首图、视频取封面。不受合并转发及其内容开关影响。关闭后恢复原有发送方式。 |
 | `stop_event_after_match` | 命中后阻断后续 LLM 处理 |
 | `reply_when_fail` | 解析失败时给用户反馈 |
 | `debug_log` | 调试日志 |

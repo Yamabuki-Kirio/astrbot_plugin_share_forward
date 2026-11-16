@@ -18,8 +18,57 @@ from .patterns import XIAOHONGSHU_LINK
 _RE_NOTE_ID = re.compile(r"/(?:explore|discovery/item)/([A-Za-z0-9]+)")
 _RE_XSEC = re.compile(r"xsec_token=([^&\s]+)")
 _RE_INITIAL = re.compile(
-    r"window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*</script>", re.IGNORECASE
+    r"window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*;?\s*</script>", re.IGNORECASE
 )
+_RE_STATE_TOKEN = re.compile(
+    r'"(?:[^"\\]|\\[\s\S])*"|(?P<undefined>\bundefined\b)'
+)
+_RE_STATE_CONSTRUCTOR = re.compile(
+    r'"(?:[^"\\]|\\[\s\S])*"'
+    r'|\bnew\s+(?P<constructor>Date|Map|Set)\s*\('
+    r'(?P<argument>(?:"(?:[^"\\]|\\[\s\S])*"|[^"()])*)\)'
+)
+
+
+def _load_initial_state(raw: str) -> dict:
+    """Normalize JavaScript undefined tokens without touching JSON strings."""
+    normalized = _RE_STATE_TOKEN.sub(
+        lambda match: "null" if match.group("undefined") else match.group(0), raw
+    )
+    def replace_constructor(match):
+        constructor = match.group("constructor")
+        if constructor is None:
+            return match.group(0)
+        argument = match.group("argument").strip()
+        # These state values are data, not executable JavaScript. Accept only
+        # JSON arguments and never evaluate constructors or arbitrary code.
+        try:
+            value = json.loads(argument) if argument else None
+        except json.JSONDecodeError:
+            return match.group(0)
+        if constructor in {"Map", "Set"}:
+            if value is None:
+                value = []
+            if not isinstance(value, list):
+                return match.group(0)
+            if constructor == "Map":
+                if not all(isinstance(pair, list) and len(pair) == 2 for pair in value):
+                    return match.group(0)
+                # Object-shaped maps are useful to downstream state readers;
+                # preserve non-string keys as entry pairs rather than coercing.
+                if all(isinstance(pair[0], str) for pair in value):
+                    value = dict(value)
+        elif value is not None and (isinstance(value, bool) or not isinstance(value, (str, int, float))):
+            return match.group(0)
+        return json.dumps(value, ensure_ascii=False)
+
+    # Convert inner constructors first; quoted constructor text is always skipped.
+    while True:
+        converted = _RE_STATE_CONSTRUCTOR.sub(replace_constructor, normalized)
+        if converted == normalized:
+            break
+        normalized = converted
+    return json.loads(normalized)
 
 
 def _build_headers(cookie: str = "") -> dict:
@@ -90,12 +139,35 @@ class XiaohongshuParser(BaseParser):
             raise ParseError("未在页面中找到 __INITIAL_STATE__，可能 Cookie 失效")
 
         raw = m2.group(1)
-        # 小红书的 __INITIAL_STATE__ 里有 undefined，需要替换
-        raw_fixed = raw.replace(":undefined", ":null")
         try:
-            state = json.loads(raw_fixed)
+            state = _load_initial_state(raw)
+        except json.JSONDecodeError as e:
+            # Report token category, never page snippets (which may contain private data).
+            token = e.doc[e.pos:e.pos + 1]
+            if not token:
+                category = "end_of_input"
+            elif token.isalpha():
+                identifier = re.match(r"\w+", e.doc[e.pos:])
+                word = identifier.group(0) if identifier else token
+                known = {"undefined", "void", "NaN", "Infinity", "function",
+                         "new", "true", "false", "null", "None", "True", "False"}
+                if word in known:
+                    category = f"identifier value={word}"
+                    if word == "new":
+                        ctor = re.match(r"new\s+([A-Za-z_$][A-Za-z0-9_$]{0,39})\s*\(", e.doc[e.pos:])
+                        if ctor:
+                            category += f" constructor={ctor.group(1)}"
+                else:
+                    category = f"identifier unknown length={len(word)} first=U+{ord(token):04X}"
+            elif token in "{}[],:;":
+                category = "punctuation"
+            else:
+                category = "other"
+            raise ParseError(
+                f"INITIAL_STATE 解析失败 xhs-state-v5 token={category}; {e}"
+            ) from e
         except Exception as e:  # noqa: BLE001
-            raise ParseError(f"INITIAL_STATE 解析失败: {e}") from e
+            raise ParseError(f"INITIAL_STATE 解析失败 [xhs-state-v2]: {e}") from e
 
         note_detail = _find_note_detail(state, note_id)
         if not note_detail:
